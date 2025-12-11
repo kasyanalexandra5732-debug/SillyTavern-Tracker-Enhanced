@@ -1,3 +1,5 @@
+### I won't be continuing development on this addon actively. You're welcome to fork it and build on it however you like.
+
 # SillyTavern Tracker Enhanced Extension
 
 An advanced, feature-rich tracker extension for SillyTavern that provides comprehensive character and scene monitoring with intelligent automation, drag-and-drop field management, and dynamic template generation.
