@@ -1,4 +1,4 @@
-import { saveChatConditional, chat, chat_metadata, setExtensionPrompt, extension_prompt_roles, deactivateSendButtons, activateSendButtons, getBiasStrings, system_message_types, sendSystemMessage, sendMessageAsUser, removeMacros, stopGeneration, extractMessageBias, messageFormatting } from "../../../../../script.js";
+import { saveChatConditional, chat, chat_metadata, setExtensionPrompt, extension_prompt_roles, deactivateSendButtons, activateSendButtons, getBiasStrings, system_message_types, sendSystemMessage, sendMessageAsUser, removeMacros, stopGeneration, extractMessageBias, messageFormatting, eventSource, event_types } from "../../../../../script.js";
 
 import { hasPendingFileAttachment } from "../../../../../scripts/chats.js";
 import { getMessageTimeStamp } from "../../../../../scripts/RossAscends-mods.js";
@@ -10,7 +10,6 @@ import { FIELD_INCLUDE_OPTIONS, getDefaultTracker, OUTPUT_FORMATS, getTracker as
 import { TrackerEditorModal } from "./ui/trackerEditorModal.js";
 import { TrackerPreviewManager } from "./ui/trackerPreviewManager.js";
 
-// Constants
 const ACTION_TYPES = {
 	CONTINUE: "continue",
 	SWIPE: "swipe",
@@ -43,13 +42,6 @@ const SYSTEM_MESSAGE_TYPES = {
 	ASSISTANT_NOTE: system_message_types.ASSISTANT_NOTE,
 };
 
-//#region Tracker Functions
-
-/**
- * Retrieves the tracker object for a given message number.
- * @param {number} mesNum - The message number.
- * @returns {object} The tracker object.
- */
 export function getTracker(mesNum) {
 	let tracker = chat[mesNum]?.tracker;
 
@@ -60,12 +52,6 @@ export function getTracker(mesNum) {
 	return tracker;
 }
 
-
-/**
- * Injects the tracker into the extension prompt system.
- * @param {object} tracker - The tracker object.
- * @param {number} position - The position to inject the tracker.
- */
 export async function injectTracker(tracker = "", position = 0) {
 	let trackerYAML = "";
 	let trackerIncluded = false;
@@ -88,42 +74,88 @@ export async function injectTracker(tracker = "", position = 0) {
 	}
 }
 
-/**
- * Clears all injected prompts.
- */
 export async function clearInjects() {
 	debug("Clearing injects");
 	await setExtensionPrompt("inlineTrackerEnhancedPrompt", "", 1, 0, true, EXTENSION_PROMPT_ROLES.SYSTEM);
 	await injectTracker("", 0);
 }
 
+export const eventHandlers = {
+	onChatChanged: async () => {
+		TrackerPreviewManager.clear();
+		for (let i = 0; i < chat.length; i++) {
+			if (chat[i].tracker) {
+				TrackerPreviewManager.updatePreview(i);
+			}
+		}
+	},
 
+	onCharacterMessageRendered: async (mesId) => {
+		await addTrackerToMessage(mesId);
+	},
 
+	onUserMessageRendered: async (mesId) => {
+		await addTrackerToMessage(mesId);
+	},
 
+	onGenerateAfterCommands: async () => {
+		if (extensionSettings.enabled && extensionSettings.injectionEnabled) {
+			const mesId = getLastNonSystemMessageIndex();
+			let tracker = "";
+			let position = 0;
 
-//#endregion
+			if (chat_metadata.tracker?.cmdTrackerOverride) {
+				tracker = chat_metadata.tracker.cmdTrackerOverride;
+			} else {
+				const lastWithTracker = getLastMessageWithTracker(chat, mesId);
+				if (lastWithTracker !== null) {
+					tracker = chat[lastWithTracker].tracker;
+					position = 0;
+				}
+			}
+			await injectTracker(tracker, position);
+		}
+	},
 
-//#region Message Generation Functions
+	onChatCompletionPromptReady: async (payload) => {
+		if (!extensionSettings.enabled || !extensionSettings.trackerInjectionEnabled) return;
 
-/**
- * Prepares the message generation process based on the generation mode.
- * @param {string} type - The type of message generation (e.g., 'continue', 'swipe', 'regenerate').
- * @param {object} options - Additional options for message generation.
- * @param {boolean} dryRun - If true, the function will simulate the operation without side effects.
- */
+		const mesId = getLastNonSystemMessageIndex();
+		let tracker = null;
+
+		if (chat_metadata.tracker?.cmdTrackerOverride) {
+			tracker = chat_metadata.tracker.cmdTrackerOverride;
+		} else {
+			const lastWithTracker = getLastMessageWithTracker(chat, mesId);
+			if (lastWithTracker !== null) {
+				tracker = chat[lastWithTracker].tracker;
+			}
+		}
+
+		if (tracker && trackerExists(tracker, extensionSettings.trackerDef)) {
+			const trackerYAML = cleanTracker(tracker, extensionSettings.trackerDef, OUTPUT_FORMATS.YAML, false);
+			if (trackerYAML) {
+				const roleplayPrompt = (extensionSettings.roleplayPrompt ?? "").trim();
+				const trackerBlock = `<tracker>\n${trackerYAML}\n</tracker>`;
+				const content = roleplayPrompt ? `${roleplayPrompt}\n${trackerBlock}` : trackerBlock;
+
+				payload.prompt.push({
+					role: EXTENSION_PROMPT_ROLES.SYSTEM,
+					content: content,
+					is_system: true
+				});
+				log(`[Tracker Enhanced] 🧩 Injected tracker into prompt array.`);
+			}
+		}
+	}
+};
+
 export async function prepareMessageGeneration(type, options, dryRun) {
 	if (!chat_metadata.tracker) chat_metadata.tracker = {};
 
 	await handleStagedGeneration(type, options, dryRun);
 }
 
-
-/**
- * Handles staged message generation.
- * @param {string} type - The type of message generation.
- * @param {object} options - Additional options for message generation.
- * @param {boolean} dryRun - If true, the function will simulate the operation without side effects.
- */
 async function handleStagedGeneration(type, options, dryRun) {
 	const manageStopButton = $("#mes_stop").css("display") === "none";
 	if (manageStopButton) deactivateSendButtons();
@@ -201,7 +233,7 @@ async function handleStagedGeneration(type, options, dryRun) {
 			const lastMesWithTracker = chat[lastMesWithTrackerIndex];
 
 			tracker = getCleanTracker(lastMesWithTracker.tracker, extensionSettings.trackerDef, FIELD_INCLUDE_OPTIONS.ALL, true, OUTPUT_FORMATS.JSON);
-			position = lastMesReverseIndex;
+			position = 0;
 		} else {
 			tracker = "";
 			position = 0;
@@ -234,12 +266,6 @@ async function showManualTrackerPopup(mesId = null) {
 	return tracker;
 }
 
-/**
- * Sends a user message based on the type and options provided.
- * @param {string} type - The type of message.
- * @param {object} options - Additional options.
- * @param {boolean} dryRun - If true, simulates the operation without side effects.
- */
 async function sendUserMessage(type, options, dryRun) {
 	if (![ACTION_TYPES.REGENERATE, ACTION_TYPES.SWIPE, ACTION_TYPES.QUIET, ACTION_TYPES.IMPERSONATE].includes(type) && !dryRun) {
 		const textareaText = String($("#send_textarea").val());
@@ -261,19 +287,10 @@ async function sendUserMessage(type, options, dryRun) {
 	}
 }
 
-/**
- * Adds a tracker to a message.
- * @param {number} mesId - The message ID.
- */
 export async function addTrackerToMessage(mesId) {
 	const manageStopButton = $("#mes_stop").css("display") === "none";
 	if (manageStopButton) deactivateSendButtons();
 	try {
-		/**
-		 * Saves the tracker to the message and updates the chat metadata.
-		 * @param {number} mesId - The message ID.
-		 * @param {object} tracker - The tracker object.
-		 */
 		const saveTrackerToMessage = async (mesId, tracker) => {
 			debug("Adding tracker to message:", { mesId, mes: chat[mesId], tracker });
 			chat[mesId].tracker = tracker;
@@ -316,5 +333,3 @@ export async function addTrackerToMessage(mesId) {
 	}
 	if (manageStopButton) activateSendButtons();
 }
-
-//#endregion
